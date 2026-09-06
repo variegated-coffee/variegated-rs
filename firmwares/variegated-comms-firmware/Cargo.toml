@@ -306,7 +306,27 @@ defmt.workspace = true
 sntpc = { workspace = true, features = ["defmt"] }
 jiff = { workspace = true, features = ["static"] }
 log.workspace = true
-esphome-device = { path = "../../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
+# The five entity types this machine builds, and no more.
+#
+# `EntityConfig` and `StateChange` are enums over every type the library carries, so each is
+# as large as its largest *enabled* variant whether or not that variant is ever constructed --
+# and this firmware stores both by value, 80 entities of the first and 70 of the second. With
+# all twenty types compiled in, `ClimateConfig` set `EntityConfig` to 120 bytes and
+# `ClimateState` set `StateChange` to 64, for two entity types that appear nowhere in
+# `esphome/entity_builder.rs`. Listing the five that do takes them to 80 and about 20.
+#
+# Keep this in step with what `entity_builder.rs` actually pushes. The failure mode of getting
+# it wrong is not a build error: an entity type that is built but not enabled here fails to
+# compile, but one that is enabled and never built merely costs the size of its variant.
+esphome-device = { path = "../../../esphome-device-rs", default-features = false, features = [
+  "embassy_net",
+  "defmt",
+  "sensor",
+  "number",
+  "binary_sensor",
+  "switch",
+  "select",
+] }
 
 [features]
 default = [

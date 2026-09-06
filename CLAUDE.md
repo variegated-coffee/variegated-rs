@@ -229,8 +229,11 @@ firmwares set the same variable from their own build scripts for the same reason
 that is built.** Not "no new warnings", not "the count did not go up" — zero. A change that
 adds one is not finished.
 
-The one exception is the comms firmware's 8, which belong entirely to `esphome-device` —
-a sibling repository that cannot be fixed from here.
+**There is no longer an exception.** The comms firmware carried 8 for a long time, all of
+them `esphome-device`'s: seven `unused_imports` in its `src/server.rs` plus the summary line.
+Every one was an import serving a body that is entirely `#[cfg(feature = "std")]`, which this
+firmware does not enable — so the fix was to gate the imports the same way, in the sibling
+repository. All six configurations are now zero.
 
 **Six configurations, and the gate script only covers four of them.**
 `scripts/build-firmware.sh` builds gs3, gs3+`pwm-steam-valve`, silvia and

@@ -322,6 +322,20 @@ From `firmwares/variegated-comms-firmware/scripts/memory-report.sh`, for whoever
 | 16,387 | `TcpBuffers<2, 4096, 4096>` |
 | 4,288 | the `portable_atomic` lock table above |
 
+**Four rows of that table have since moved, and the two ESPHome ones moved the most.** Each
+ESPHome entity type is now a Cargo feature, and this firmware enables the five it actually
+builds — `sensor`, `number`, `binary_sensor`, `switch`, `select`. `EntityConfig` and
+`StateChange` are enums over every enabled type, so both had been sized by `Climate`, which
+appears nowhere in `entity_builder.rs`: 120 bytes and 64 respectively, against 80 and about 20
+for the five that are real. With `MAX_ENTITIES` also cut 128 → 80 against a measured 66, the
+entity table went 15,364 → 6,404 and the state-change channel 4,516 → about 1,470.
+
+The other two: the HTTP server went to one handler slot with a 32-entry header table
+(`TcpBuffers<1, 4096, 4096>`, and its task future roughly halved), and the uplink, uploader,
+WebSocket and HTTP body buffers all moved from the heap into `.bss` and were then right-sized
+against what they hold. Net across all of it, the heap went 122,880 → 137,008 with `.stack`
+unchanged, because `.bss` deleted outright is heap gained one for one.
+
 A task future is a static sized for its worst case, so anything a task holds across an await
 is permanent RAM. That is why the three server tasks dominate: each owns a ~3.6 kB `Status` or
 `Configuration` clone.

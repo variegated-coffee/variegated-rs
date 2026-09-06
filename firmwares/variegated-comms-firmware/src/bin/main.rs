@@ -677,6 +677,17 @@ async fn main(spawner: Spawner) -> ! {
     // four times. Which is the argument for setting this line from `.stack` rather than from
     // arithmetic: build, read the section, and return whatever moved.
     //
+    // Then the ESPHome entity table and state channel: putting each entity type behind a
+    // Cargo feature took `size_of::<EntityConfig>()` from 120 to 80 and
+    // `size_of::<StateChange>()` from 64 to about 20 -- both had been sized by `Climate`, a
+    // type this machine never builds -- and `MAX_ENTITIES` went 128 -> 80 against a measured
+    // 66. Worth 13672 more, again deleted rather than moved.
+    //
+    // **37544 - 10848 - 18960 - 13672 = -5936, and the sign is the point.** More static was
+    // deleted than was ever moved into `.bss`, so this region is now *larger* than the 64 kB
+    // it started at rather than smaller. Total heap 65536 + 71472 = 137008, against 122880
+    // before any of this work -- and with the churn gone as well.
+    //
     // 37544 - 10848 = 26696, then **-18960 when the HTTP server went from two handler slots
     // to one and its header table from 64 to 32**. That is the opposite direction from
     // everything above it: not a buffer moved out of the heap, but a static deleted outright,
@@ -700,7 +711,7 @@ async fn main(spawner: Spawner) -> ! {
     // `max_connections: 6`, `r_esp_ble_msys_init`'s 10752, and the per-association driver
     // boxes in `ble/devices.rs`, which are held for peripherals that are merely *enabled*.
     // Right-sizing these buffers is worth ~10 kB and is not by itself the answer.
-    esp_alloc::heap_allocator!(size: 64 * 1024 - 7736);
+    esp_alloc::heap_allocator!(size: 64 * 1024 + 5936);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

@@ -311,14 +311,22 @@ const MAX_INDEXED: usize = MAX_BOILERS;
 
 /// Ceiling on the entity table.
 ///
-/// A dual-boiler machine builds about 100. 128 leaves headroom for another component
-/// without being so generous that the reservation hurts: at
-/// `size_of::<EntityConfig>() == 120` this is 15360 bytes of `.bss`, and `.bss` comes out
-/// of the stack.
+/// **80, against a measured 66.** The GS3 -- dual boiler, one group, tap, wand and tank --
+/// reports `Built 66 dynamic entities from configuration` at boot, so this is fourteen slots
+/// of margin, or roughly one more component's worth.
 ///
-/// Overflow truncates and logs rather than panicking. A machine missing three sensors
-/// from Home Assistant is a much better outcome than one that will not boot.
-pub const MAX_ENTITIES: usize = 128;
+/// The predecessor said "a dual-boiler machine builds about 100" and reserved 128. That
+/// estimate was never checked against a running machine and was half as much again as the
+/// truth, which cost 15,360 bytes of `.bss` -- and `.bss` competes with the heap for one
+/// RWDATA remainder on a processor that was reading two kilobytes free. Together with the
+/// entity-type features in `Cargo.toml`, which take `size_of::<EntityConfig>()` from 120 to
+/// 80, the table is now 6,404 bytes.
+///
+/// Overflow truncates and logs rather than panicking. A machine missing three sensors from
+/// Home Assistant is a much better outcome than one that will not boot -- but note the signal
+/// is only the `log_warn!` below, so **if a component is ever added, read that line rather
+/// than assuming the margin held**.
+pub const MAX_ENTITIES: usize = 80;
 
 /// The entity table, sized once and held for the life of the process.
 pub type EntityList = heapless::Vec<EntityConfig<'static>, MAX_ENTITIES>;

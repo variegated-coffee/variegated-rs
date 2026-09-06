@@ -16,11 +16,12 @@
 # without them; the values are irrelevant to a compile check. The TCP-command flag
 # is set so the `option_env!`-gated command path is type-checked too.
 #
-# Expect 8 warnings, 0 errors -- and **every one of the 8 belongs to `esphome-device`**
-# (7 diagnostics plus its summary line), which lives in the sibling `esphome-device-rs`
-# repository and cannot be fixed from here. Nothing in this repository contributes to the
-# number, so 8 is the floor until that sibling repo is cleaned, and anything above 8 is a
-# regression.
+# Expect **0 warnings, 0 errors**. This read "expect 8" for a long time: seven
+# `unused_imports` in `esphome-device`'s `src/server.rs` plus its summary line. They were all
+# one bug -- that file's body is entirely `#[cfg(feature = "std")]` while its imports were not,
+# so a `no_std` consumer like this one was left with seven imports serving nothing -- and the
+# sibling repository now gates them to match. There is no floor any more; any warning here is
+# a regression.
 #
 # Usage: scripts/build-comms-firmware.sh [output-dir]
 set -u
