@@ -50,26 +50,27 @@ variegated-schema-export = { path = "../../crates/variegated-schema-export" }
 #
 # `gatt-client-notification-queue-size-4`, and this one is worth more than it looks.
 #
-# It sizes `GattClient::notifications`, and that field is **94% of a `GattClient`**:
-# measured with a compile-time probe, the struct is 4544 bytes at depth 8, of which the
-# queue is 4256, `known_services` 216 and everything else 72. Since each slot's boxed
-# driver future carries a client, this is the largest single lever on the ~10 kB a peripheral
-# costs on the heap -- far larger than the `MAX_SERVICES` const generic it is easy to blame,
-# which is worth 216 bytes in total.
+# It sizes `GattClient::notifications`, and that field dominated the struct: measured with a
+# compile-time probe under trouble-host 0.7, `GattClient` was 4544 bytes at depth 8, of which
+# the queue was 4256, `known_services` 216 and everything else 72. Since each slot's boxed
+# driver future carries a client -- two, for a scale -- this was the largest single lever on
+# the ~10 kB a peripheral cost on the heap, far larger than the `MAX_SERVICES` const generic
+# it is easy to blame, which is worth 216 bytes in total.
 #
-# Measured cost per depth, other parameters fixed: 8 -> 4256, 4 -> 2160, 2 -> 1112, 1 -> 584.
-# So 8 -> 4 returns 2096 bytes per connected peripheral, and stays a genuine queue.
+# Cost per depth on 0.7, other parameters fixed: 8 -> 4256, 4 -> 2160, 2 -> 1112, 1 -> 584.
+# 8 -> 4 returned 2096 bytes per client and stayed a genuine queue.
+#
+# **The 0.8 upgrade then halved each entry again**, because 0.7 hardcoded `Notification<512>`
+# while our pool MTU is 255, and 0.8 derives the payload size from the pool instead: 248. So
+# `GattClient` is now 1392 bytes, down from 4544. Note the corollary -- depth 8 today would
+# cost about what depth 4 cost on 0.7. **The buffering is available again if it is ever
+# wanted; it is left at 4 because the heap is what we were short of, not the queue.**
 #
 # The depth is the slack between a scale notifying at 10-20 Hz and `run_scale_slot`'s
 # `select3` draining it, so undersizing it drops weight samples -- and those feed the flow
 # estimator, where a gap is worse than a delay. Four is ~200-400 ms of buffering, which is
 # far more than the loop needs when it is not blocked and still short enough to matter if
-# it ever is. **If weight samples start going missing, this is the line.**
-#
-# Note what half of each entry is: `Notification<512>` hardcodes 512 bytes of payload while
-# `default-packet-pool-mtu-255` above says the real MTU is 255, so ~257 of every 528-byte
-# entry is padding. trouble carries a TODO to size it from `P::MTU` once
-# `min_generic_const_args` lands; when that happens this depth can go back up for free.
+# it ever is. **If weight samples start going missing, this is the first line to change.**
 trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "security", "legacy-pairing", "defmt", "gatt-client-notification-queue-size-4", "l2cap-rx-queue-size-8"] }
 # Improv Wi-Fi provisioning. `ble` brings in the GATT service and the run loop; without it
 # this crate is just the packet codec, which is how its host tests stay runnable.

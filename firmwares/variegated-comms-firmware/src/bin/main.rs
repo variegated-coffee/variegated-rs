@@ -869,9 +869,11 @@ async fn main(spawner: Spawner) -> ! {
     // and there are `MAX_BLUETOOTH_PERIPHERALS` of those. Six unusable slots is not a large
     // number of bytes, but this firmware has 6,688 of uncommitted SRAM and no reason to spend
     // any of them on bonds no association can reach.
+    //
+    // trouble-host 0.8 dropped the leading controller type parameter this carried under 0.7;
+    // the pool and the four counts are unchanged, and so is what each of them means.
     let ble_resources = mk_static!(
         HostResources<
-            ExternalController<BleConnector<'static>, 20>,
             DefaultPacketPool,
             6,
             2,

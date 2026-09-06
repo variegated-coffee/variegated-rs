@@ -8,6 +8,7 @@ use variegated_trouble_connection_manager::{
     Connection, Controller, DeviceHandle, GattClient, PacketPool, Stack,
 };
 
+use crate::NOTIF_MTU;
 use crate::bookoo::{
     types::{
         ScaleEvent, BOOKOO_COMMAND_CHAR_UUID, BOOKOO_SERVICE_UUID, BOOKOO_WEIGHT_CHAR_UUID,
@@ -20,12 +21,12 @@ use crate::bookoo::{
 /// Wraps a `NotificationListener` and a [`Reassembler`]. Keep the `Connection` and the
 /// GATT client alive for as long as this stream is in use.
 pub struct BookooNotificationStream<'a> {
-    listener: NotificationListener<'a, 512>,
+    listener: NotificationListener<'a, NOTIF_MTU>,
     reassembler: Reassembler,
 }
 
 impl<'a> BookooNotificationStream<'a> {
-    fn new(listener: NotificationListener<'a, 512>) -> Self {
+    fn new(listener: NotificationListener<'a, NOTIF_MTU>) -> Self {
         Self {
             listener,
             reassembler: Reassembler::new(),

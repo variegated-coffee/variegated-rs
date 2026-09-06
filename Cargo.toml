@@ -326,15 +326,26 @@ toml = "0.8.19"
 # the CCCD handle and so could not tell one of a device's several Report characteristics from
 # another.
 #
-# **This is why `esp-radio` is patched below.** 0.7 requires bt-hci ^0.9, and no released
-# esp-radio asks for it: 0.18.0 and 1.0.0-beta.0 both pin ^0.8.0. See the patch section.
+# **0.8.0, and the reason is memory rather than features.** 0.7 hardcodes the GATT client's
+# notification buffer as `Notification<512>` -- a literal, not a config -- while our packet
+# pool MTU is 255, so more than half of every queue entry was padding. 0.8 derives it:
+# `GATT_CLIENT_NOTIFICATION_MTU = DEFAULT_PACKET_POOL_MTU - 7` whenever the pool MTU feature
+# is set, which for us is 248. Since that queue is ~94% of a `GattClient`, and a scale's
+# driver future carries two clients, this is worth about 2 kB per connected scale on a
+# processor with roughly 40 kB of heap headroom. See the `trouble-host` feature list in
+# `firmwares/variegated-comms-firmware/Cargo.toml` for the measurements.
+#
+# **This is why `esp-radio` is patched below, and 0.8 made that patch bigger.** 0.7 required
+# bt-hci ^0.9 and the fork was a version string; 0.8 requires ^0.10, which moved the
+# `Transport` trait into `bt-hci-transport` and changed the signature esp-radio implements.
+# The fork now carries one patched function. See the patch section and `../esp-radio-fork/FORK.md`.
 #
 # The old note about two embassy-sync versions coexisting no longer applies: 0.6.0 wanted
 # ^0.7 against esp-hal's ^0.8, and 0.7.0 wants ^0.8, so the lockfile now has one.
 # `variegated-improv-trouble` pinned its own `embassy-sync = "0.7"` for that reason and can
 # now follow the workspace.
-trouble-host = "0.7.0"
-bt-hci = "0.9"
+trouble-host = "0.8.0"
+bt-hci = "0.10"
 
 embassy-net = "0.9.1"
 

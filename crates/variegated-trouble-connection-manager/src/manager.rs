@@ -534,13 +534,22 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
     where
         C: ControllerCmdSync<LeSetScanParams> + ControllerCmdSync<LeSetScanEnable>,
     {
-        // `take`, and this is why `central` is an `Option`: `Scanner::new` consumes the
-        // `Central` by value and `into_inner` gives it back.
-        let Some(central) = self.central.borrow_mut().take() else {
+        // `take`, and this is still why `central` is an `Option`, though no longer for the
+        // reason it started as. Under trouble-host 0.7 `Scanner::new` consumed the `Central`
+        // by value and `into_inner` gave it back, so there was no choice. In 0.8 it borrows
+        // -- `Scanner<'d, 'stack, ..> { central: &'d mut Central<'stack, ..> }` -- so this
+        // could hold the `RefCell` borrow instead and skip the dance.
+        //
+        // It deliberately does not. There are awaits below, and the connect loop borrows
+        // this same `RefCell`; a `borrow_mut` held across them turns a concurrent borrow
+        // from a skipped connection attempt into a panic. Taking the `Central` out is what
+        // makes "no central available" a state the connect loop can *observe* rather than
+        // collide with, and that property is worth more than the two lines it costs.
+        let Some(mut central) = self.central.borrow_mut().take() else {
             defmt::warn!("[ble] scan requested with no central available");
             return;
         };
-        let mut scanner = Scanner::new(central);
+        let mut scanner = Scanner::new(&mut central);
 
         let config = ScanConfig {
             active: request.active,
@@ -611,8 +620,10 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
         sink.end(started);
 
         // Borrow-checked ordering: `scan` takes `&mut scanner` and the session borrows
-        // it, so the session is necessarily dropped before this line.
-        *self.central.borrow_mut() = Some(scanner.into_inner());
+        // it, so the session is necessarily dropped before this line -- and `scanner` itself
+        // borrows `central`, so it must be dead before `central` can be moved back.
+        drop(scanner);
+        *self.central.borrow_mut() = Some(central);
         defmt::info!("[ble] discovery scan finished; resuming connections");
     }
 }

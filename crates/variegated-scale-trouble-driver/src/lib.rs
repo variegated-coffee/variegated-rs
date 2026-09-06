@@ -46,3 +46,17 @@ pub mod bookoo;
 /// Re-export trouble-host types for convenience
 pub use variegated_trouble_connection_manager::{BdAddr, Connection, Controller, Stack};
 pub use variegated_trouble_connection_manager::{DeviceHandle, GattClient, PacketPool};
+
+/// The notification payload size trouble-host's GATT client hands a listener.
+///
+/// **Taken from trouble rather than written down**, which is the whole point of this
+/// constant. Every `NotificationListener` in this crate used to say `512`, and that was
+/// correct only because trouble-host 0.7 hardcoded `Notification<512>` regardless of the
+/// packet pool. 0.8 derives it -- `GATT_CLIENT_NOTIFICATION_MTU` is the pool MTU less 7,
+/// i.e. `ATT_MTU - 3` -- so with the comms firmware's `default-packet-pool-mtu-255` it is
+/// 248, and all six sites stopped compiling at once.
+///
+/// That was the good outcome: a mismatch here is a type error rather than a silent
+/// truncation of a notification payload. Referring to the constant keeps that property
+/// while making the next MTU change a rebuild instead of an edit.
+pub const NOTIF_MTU: usize = trouble_host::config::GATT_CLIENT_NOTIFICATION_MTU;

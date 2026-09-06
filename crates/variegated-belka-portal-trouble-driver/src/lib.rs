@@ -23,3 +23,11 @@ pub use types::{
 pub use variegated_trouble_connection_manager::{
     BdAddr, BleConnectionManager, Controller, DeviceHandle, ManagerHandle, PacketPool,
 };
+
+/// The notification payload size trouble-host's GATT client hands a listener.
+///
+/// Taken from trouble rather than written down. This said `512` until trouble-host 0.8,
+/// which derives the figure from the packet pool MTU (`ATT_MTU - 3`) instead of hardcoding
+/// it -- 248 for the comms firmware's `default-packet-pool-mtu-255`. See the twin in
+/// `variegated-scale-trouble-driver` for the longer note.
+pub const NOTIF_MTU: usize = trouble_host::config::GATT_CLIENT_NOTIFICATION_MTU;

@@ -5,6 +5,7 @@ use trouble_host::gatt::NotificationListener;
 use trouble_host::attribute::Characteristic;
 use trouble_host::prelude::Uuid;
 
+use crate::NOTIF_MTU;
 use crate::acaia_old::{
     types::{ScaleEvent, WeightMeasurement, ACAIA_OLD_SERVICE_UUID, ACAIA_OLD_CHAR_UUID, IDENTIFICATION_MSG, NOTIFICATION_REQUEST_MSG, TARE_CMD, HEARTBEAT_MSG, TIMER_START_CMD, TIMER_STOP_CMD, TIMER_RESET_CMD},
     Error,
@@ -20,7 +21,7 @@ use variegated_scale_codec::acaia::{Frame, Reassembler};
 /// Parsing lives in `variegated-scale-codec`, which can host tests; this crate cannot. See
 /// that crate's docs for why.
 pub struct ScaleNotificationStream<'a> {
-    listener: NotificationListener<'a, 512>,
+    listener: NotificationListener<'a, NOTIF_MTU>,
     reassembler: Reassembler,
     /// Latches the "this looks like a modern scale" warning below.
     warned_modern: bool,
@@ -28,7 +29,7 @@ pub struct ScaleNotificationStream<'a> {
 
 impl<'a> ScaleNotificationStream<'a> {
     /// Create a new notification stream from a listener
-    fn new(listener: NotificationListener<'a, 512>) -> Self {
+    fn new(listener: NotificationListener<'a, NOTIF_MTU>) -> Self {
         Self {
             listener,
             // **Auto-detecting, and it has to be.** The old GATT does not settle the

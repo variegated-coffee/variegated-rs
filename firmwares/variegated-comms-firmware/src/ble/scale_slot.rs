@@ -22,14 +22,14 @@
 //! `devices.rs` records the panic that taught us to care: `memory allocation of 12000
 //! bytes failed`, a *contiguity* failure inside one `esp_alloc` region rather than a
 //! shortage. Each `match` arm there is boxed separately, so this function's future is
-//! allocated at its own size -- 6624 bytes for the ACAIA -- and never at the size of the
+//! allocated at its own size -- 4512 bytes for the ACAIA -- and never at the size of the
 //! heaviest driver compiled in.
 //!
 //! An enum session would still be worse, and for a reason boxing does not address. A
 //! notification stream borrows its GATT client, and a self-referential pair cannot live in
 //! one struct -- so both clients would have to be function-scope `Option`s, live across
 //! every await, and therefore both present in the coroutine *simultaneously*. That is a
-//! sum under any layout, and a `GattClient` is 2448 bytes.
+//! sum under any layout, and a `GattClient` is 1392 bytes.
 //!
 //! Which is worth stating precisely, because this frame already holds two of them: one
 //! inside the `connect` future and one in the local it lands in. Measured -- halving the

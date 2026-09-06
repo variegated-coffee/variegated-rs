@@ -10,6 +10,7 @@ use variegated_trouble_connection_manager::{
     Connection, Controller, DeviceHandle, GattClient, PacketPool, Stack,
 };
 
+use crate::NOTIF_MTU;
 use crate::acaia_new::{
     types::{
         ScaleEvent, ACAIA_NEW_NOTIFY_CHAR_UUID, ACAIA_NEW_SERVICE_UUID,
@@ -35,7 +36,7 @@ const TIMER_RESET_CMD: [u8; 7] = codec::timer(TimerOp::Reset);
 
 /// Notification stream for a 2021+ ACAIA scale.
 pub struct AcaiaNewNotificationStream<'a> {
-    listener: NotificationListener<'a, 512>,
+    listener: NotificationListener<'a, NOTIF_MTU>,
     reassembler: Reassembler,
     /// Latches the `discarded()` warning, so a persistently rejected stream says so once
     /// rather than at the notification rate.
@@ -43,7 +44,7 @@ pub struct AcaiaNewNotificationStream<'a> {
 }
 
 impl<'a> AcaiaNewNotificationStream<'a> {
-    fn new(listener: NotificationListener<'a, 512>) -> Self {
+    fn new(listener: NotificationListener<'a, NOTIF_MTU>) -> Self {
         Self {
             listener,
             reassembler: Reassembler::new(Generation::Modern),

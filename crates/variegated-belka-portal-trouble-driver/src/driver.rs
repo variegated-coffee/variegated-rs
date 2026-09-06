@@ -4,19 +4,19 @@ use trouble_host::gatt::NotificationListener;
 use trouble_host::attribute::Characteristic;
 use trouble_host::prelude::Uuid;
 
-use crate::{types::{Measurements, BELKA_SERVICE_UUID, COMMAND_CHAR_UUID, MEASUREMENT_CHAR_UUID}, Error};
+use crate::{types::{Measurements, BELKA_SERVICE_UUID, COMMAND_CHAR_UUID, MEASUREMENT_CHAR_UUID}, Error, NOTIF_MTU};
 
 /// Notification stream for Belka Portal measurements
 ///
 /// This type wraps a NotificationListener and provides parsed measurement data.
 /// Note: You must keep the Connection and GattClient alive while using this stream.
 pub struct MeasurementNotificationStream<'a> {
-    listener: NotificationListener<'a, 512>,
+    listener: NotificationListener<'a, NOTIF_MTU>,
 }
 
 impl<'a> MeasurementNotificationStream<'a> {
     /// Create a new notification stream from a listener
-    fn new(listener: NotificationListener<'a, 512>) -> Self {
+    fn new(listener: NotificationListener<'a, NOTIF_MTU>) -> Self {
         Self { listener }
     }
 

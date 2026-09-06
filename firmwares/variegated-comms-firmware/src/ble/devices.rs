@@ -412,21 +412,25 @@ pub async fn ble_slot_task(
         // not have. Per arm it allocates exactly the driver that was chosen. Smaller blocks
         // are also the friendlier shape for the contiguity failure described below.
         //
-        // Measured with a compile-time probe, before and after the notification-queue change
-        // recorded beside `trouble-host` in `Cargo.toml`:
+        // Measured with a compile-time probe, across the two changes recorded beside
+        // `trouble-host` in `Cargo.toml` -- the notification queue halved to 4, then the move
+        // to trouble-host 0.8, which sizes a notification from the packet pool MTU instead of
+        // hardcoding 512:
         //
-        //     belka     10040 -> 5848      AcaiaNew  10816 -> 6624
-        //     AcaiaOld  10608 -> ~6400     Bookoo    10616 -> ~6400
-        //     Ulanzi     6160 -> 4064
+        //                  0.7 q8     0.7 q4     0.8 q4
+        //     belka         10040       5848       3736
+        //     AcaiaNew      10816       6624       4512
+        //     Ulanzi         6160       4064       3008
         //
-        // So a dial now costs 4064 where it used to cost 10816, and a scale 6624.
+        // So a dial costs 3008 where it used to cost 10816, and a scale 4512.
         //
-        // Note what those deltas say. The queue change took 2096 bytes off a `GattClient`,
+        // Note what those deltas say. Halving the queue took 2096 bytes off a `GattClient`,
         // and it took **4192** off every scale and belka frame -- exactly twice -- so those
         // futures hold two clients live at once, one in the `connect` future and one in the
         // local it lands in. The dial's frame moved by 2096, so it holds one. That is worth
         // knowing before anyone tries to shrink these further: the client is not merely the
-        // largest thing in the frame, it is in there twice.
+        // largest thing in the frame, it is in there twice, and anything that shrinks a
+        // client is worth double here.
         //
         // Boxing per arm also retires a question this code used to rest on. A single box is
         // `max` rather than `sum` only if rustc overlaps the locals of mutually exclusive
