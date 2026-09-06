@@ -781,7 +781,35 @@ async fn main(spawner: Spawner) -> ! {
     // the radio is brought up implicitly by the BLE/WiFi constructors.
 
     // Initialize BLE (before WiFi for stability)
-    let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
+    //
+    // **`max_connections` is not a default that can be left alone.** esp-radio's C6 BLE
+    // `Config::default()` sets it to 2, and it is the *controller's* ACL link table --
+    // the one thing in the BLE stack that `HostResources` below cannot influence. With
+    // the default, the third `LE Create Connection` is rejected by the controller with a
+    // command status error, so it fails in about two milliseconds rather than timing out,
+    // and trouble then logs `error cancelling connection` because it sends
+    // `Create_Connection_Cancel` for a connection that was never begun. Two peripherals
+    // worked, three did not, and nothing in this firmware's own sizing said why.
+    //
+    // 6, to match `CONNS` below exactly: four associable peripherals, one slot of margin
+    // for a reconnect overlapping a link still tearing down, and one for the Improv
+    // peripheral connection. Those are the same six for the same reasons -- see the
+    // `HostResources` comment -- and they are deliberately one number, because a
+    // controller table smaller than the host's is invisible until the link count reaches
+    // it, which is exactly how this was found.
+    //
+    // The cost is heap, not `.stack`: the controller's per-connection state is allocated
+    // by the blob through `esp_alloc::HEAP`. That heap is genuinely tight here -- see the
+    // Wi-Fi buffer note below, where the default dynamic buffer caps once exhausted it
+    // outright -- so if this number grows again, read `Heap high-water` from the 1 Hz
+    // snapshot rather than assuming the room is there. The ACL buffer pool
+    // (`acl_buf_count` 24 x `acl_buf_size` 255) is shared across links and is left alone;
+    // it is not multiplied by this.
+    let connector = BleConnector::new(
+        peripherals.BT,
+        esp_radio::ble::Config::default().with_max_connections(6),
+    )
+    .unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
     // Create BLE host resources.
