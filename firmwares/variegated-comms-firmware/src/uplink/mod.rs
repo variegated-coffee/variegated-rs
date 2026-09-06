@@ -207,15 +207,121 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(15);
 
 /// Receive buffer.
 ///
-/// Heap rather than a `static`, for the reason the upload path gives: every byte of `.bss`
-/// costs a byte of `.stack`. Sized against the largest record a machine may be sent plus
-/// WebSocket framing, because nothing larger can legitimately arrive -- the server declares
-/// its bound in the handshake and this is ours.
+/// Sized against the largest record a machine may be sent plus WebSocket framing, because
+/// nothing larger can legitimately arrive -- the server declares its bound in the handshake
+/// and this is ours.
 const TCP_RX_LEN: usize = MAX_UPLINK_CLIENT_RECORD_LEN + 512;
 
 /// Transmit buffer, two maximum segments, matching the upload path's reasoning: under 2 MSS
 /// interacts badly with Nagle.
 const TCP_TX_LEN: usize = 4096;
+
+/// The three long-lived buffers a session needs, in `.bss` rather than on the heap.
+///
+/// **This reverses what the comments here used to say**, so it is worth recording why rather
+/// than leaving the reader to find the old argument in the history. They were heap
+/// allocations "because every byte of `.bss` costs a byte of `.stack`", which is true and is
+/// still true -- but only if the heap stays the same size. The second `heap_allocator!` in
+/// `bin/main.rs` is itself carved out of the RWDATA remainder, so moving these to `.bss` and
+/// shrinking that region by the same 9,216 bytes leaves `.stack` exactly where it was. That
+/// is the trade this makes, and `bin/main.rs` records the matching subtraction.
+///
+/// What it buys is not bytes but *shape*. `rx` and `tx` were allocated per connection attempt
+/// -- every 15 seconds while the link is down -- and the scratch once per session, into the
+/// same `esp_alloc` region whose contiguity failure is documented at
+/// `ble/devices.rs`'s driver box. Three allocations of 2,816, 4,096 and 2,304 bytes,
+/// appearing and disappearing on a reconnect loop, are exactly the churn that leaves a region
+/// with ample free space and nowhere to put a large block. Static, the high-water mark is a
+/// constant and the reconnect path allocates nothing at all.
+///
+/// **Sound because `uplink_task` is a singleton.** It carries no `pool_size`, so there is one
+/// instance and therefore one owner of these bytes. That is the whole argument, and it is
+/// why the BLE slot buffers -- a pool of `MAX_BLUETOOTH_PERIPHERALS` -- cannot do this.
+/// Largest plaintext this machine will put in one outbound record.
+///
+/// **Measured, not guessed.** `size_of::<UplinkMessage>()` is 4,192 bytes, and the variant
+/// that sets it is `Status` (also 4,192; `Configuration` is 3,772 and `MachineDefinition`
+/// 3,660, while `RoutineList` is a 36-byte summary). Postcard encodes these structs at or
+/// below their in-memory size -- fixed-width scalars stay fixed width and `Option`s cost a
+/// tag byte against a whole niche -- so the in-memory figure is the bound, and this carries
+/// about 10% over it.
+///
+/// Shot logs do not come through here. They stream through [`send_shot`] a chunk at a time
+/// and are bounded by `UPLINK_CHUNK` regardless of shot size.
+///
+/// Sizing this wrong is not a memory-safety question: `postcard::to_slice` refuses to
+/// overrun and [`send_message`] logs and drops, which is the same graceful failure the old
+/// heap path had when a message would not fit one record. Every message this can drop is one
+/// the server recovers from on its own.
+const UPLINK_MESSAGE_LEN: usize = 4608;
+
+/// What [`UPLINK_MESSAGE_LEN`] of plaintext occupies once sealed.
+///
+/// Mirrors `UplinkSession::sealed_len`, which is not a `const fn`, so this cannot simply call
+/// it. [`send_message`] checks the real function against this buffer's length before writing,
+/// so the arithmetic here is a sizing hint rather than a safety argument.
+const UPLINK_SEALED_LEN: usize = sealed_len_const(UPLINK_MESSAGE_LEN);
+
+const fn sealed_len_const(plaintext_len: usize) -> usize {
+    8 + plaintext_len + plaintext_len.div_ceil(UPLINK_CHUNK) * UPLINK_TAG
+}
+
+/// The long-lived buffers a session needs, in `.bss` rather than on the heap.
+///
+/// **This reverses what the comments here used to say**, so it is worth recording why rather
+/// than leaving the reader to find the old argument in the history. These were heap
+/// allocations "because every byte of `.bss` costs a byte of `.stack`", which is true and is
+/// still true -- but only if the heap stays the same size. The second `heap_allocator!` in
+/// `bin/main.rs` is itself carved out of the RWDATA remainder, so moving these to `.bss` and
+/// shrinking that region by the same number of bytes leaves `.stack` exactly where it was.
+/// That is the trade this makes, and `bin/main.rs` records the matching subtraction.
+///
+/// What it buys is not bytes but *shape*. `rx` and `tx` were allocated per connection attempt
+/// -- every 15 seconds while the link is down -- the scratch once per session, and `plain`
+/// and `sealed` **twice per outbound message**, which during a shot is once a second. All of
+/// it went into the same `esp_alloc` region whose contiguity failure is documented at the
+/// driver box in `ble/devices.rs`: allocations appearing and disappearing on a loop are
+/// exactly what leaves a region with ample free space and nowhere to put a large block.
+/// Static, the high-water mark is a constant and the steady state allocates nothing at all.
+///
+/// **Sound because `uplink_task` is a singleton.** It carries no `pool_size`, so there is one
+/// instance and therefore one owner of these bytes. That is the whole argument, and it is why
+/// the BLE slot buffers -- a pool of `MAX_BLUETOOTH_PERIPHERALS` -- cannot do the same.
+struct Buffers {
+    rx: [u8; TCP_RX_LEN],
+    tx: [u8; TCP_TX_LEN],
+    /// One scratch for the life of a session rather than one per record, so the task's
+    /// high-water does not depend on how long a session lasts.
+    scratch: [u8; MAX_UPLINK_CLIENT_RECORD_LEN],
+    /// Where an outbound message is encoded, and where it is sealed from.
+    ///
+    /// Two buffers rather than one because `seal_record` reads plaintext and writes
+    /// ciphertext, and they are separate regions.
+    plain: [u8; UPLINK_MESSAGE_LEN],
+    sealed: [u8; UPLINK_SEALED_LEN],
+}
+
+impl Buffers {
+    const fn new() -> Self {
+        Self {
+            rx: [0; TCP_RX_LEN],
+            tx: [0; TCP_TX_LEN],
+            scratch: [0; MAX_UPLINK_CLIENT_RECORD_LEN],
+            plain: [0; UPLINK_MESSAGE_LEN],
+            sealed: [0; UPLINK_SEALED_LEN],
+        }
+    }
+}
+
+/// The two outbound buffers, borrowed together.
+///
+/// Split from [`Buffers`] so the send path can hold these while the read path holds
+/// `scratch`: they are disjoint fields, and passing them as one value keeps every send
+/// signature to a single extra parameter.
+struct Out<'a> {
+    plain: &'a mut [u8; UPLINK_MESSAGE_LEN],
+    sealed: &'a mut [u8; UPLINK_SEALED_LEN],
+}
 
 /// Why one attempt ended.
 ///
@@ -273,6 +379,10 @@ pub async fn uplink_task(
     let mut config: Option<ShotUploadConfig> = None;
     let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::Uplink);
 
+    // Taken once, here, rather than per session: `mk_static!` panics on a second take, and
+    // this task loops over sessions forever. See [`Buffers`] for why these are `.bss`.
+    let buffers = crate::mk_static!(Buffers, Buffers::new());
+
     loop {
         checkin.good();
 
@@ -295,6 +405,7 @@ pub async fn uplink_task(
         match session(
             stack,
             current,
+            buffers,
             &mut routines,
             &mut configuration,
             &commands,
@@ -339,6 +450,7 @@ async fn wait(total: Duration, checkin: &variegated_checkin::CheckinHandle) {
 async fn session(
     stack: Stack<'static>,
     config: &ShotUploadConfig,
+    buffers: &mut Buffers,
     routines: &mut channels::ApplicationRoutineSubscriber,
     configuration: &mut channels::ApplicationConfigurationSubscriber,
     commands: &embassy_sync::channel::Sender<
@@ -375,9 +487,19 @@ async fn session(
         }
     };
 
-    let mut rx = alloc::vec![0u8; TCP_RX_LEN];
-    let mut tx = alloc::vec![0u8; TCP_TX_LEN];
-    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    // Destructured into disjoint field borrows so the socket can hold `rx` and `tx` while
+    // `run` holds `scratch`, `plain` and `sealed`. One `&mut Buffers` passed onward would
+    // conflict with the socket's borrow; three (four, counting the `Out` pair) do not.
+    let Buffers {
+        rx,
+        tx,
+        scratch,
+        plain,
+        sealed,
+    } = buffers;
+    let mut out = Out { plain, sealed };
+
+    let mut socket = TcpSocket::new(stack, rx, tx);
     socket.set_timeout(Some(SOCKET_TIMEOUT));
 
     // A fresh ephemeral per attempt. Reusing one derives the same session keys, which
@@ -425,6 +547,8 @@ async fn session(
         &mut socket,
         &mut pending,
         session,
+        scratch,
+        &mut out,
         routines,
         configuration,
         commands,
@@ -485,10 +609,15 @@ enum Wake {
     Frame,
     /// The routine list changed.
     Routines,
-    /// A setting changed. Carries the encoded configuration when the message itself was in
-    /// hand, and `None` when it was not -- a `Lagged`, or a machine asleep -- in which case the
-    /// cache is the right source. See the narrowing site for why the two differ.
-    Configuration(Option<alloc::vec::Vec<u8>>),
+    /// A setting changed. Carries the *length* of the encoded configuration already written
+    /// into `out.plain` when the message itself was in hand, and `None` when it was not -- a
+    /// `Lagged`, or a machine asleep -- in which case the cache is the right source. See the
+    /// narrowing site for why the two differ.
+    ///
+    /// A length rather than the bytes, since the bytes now live in a buffer that outlives this
+    /// value; carrying a `Vec` here was one of the two allocations per message that
+    /// [`Buffers`] exists to remove.
+    Configuration(Option<usize>),
     /// The uploader is offering a shot, and is blocked until it hears back.
     Shot(variegated_controller_types::shot_log::ShotLogId, u32),
 }
@@ -498,6 +627,8 @@ async fn run(
     socket: &mut TcpSocket<'_>,
     pending: &mut Pending,
     mut session: UplinkSession,
+    scratch: &mut [u8; MAX_UPLINK_CLIENT_RECORD_LEN],
+    out: &mut Out<'_>,
     routines: &mut channels::ApplicationRoutineSubscriber,
     configuration: &mut channels::ApplicationConfigurationSubscriber,
     commands: &embassy_sync::channel::Sender<
@@ -508,9 +639,6 @@ async fn run(
     >,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
-    // One scratch buffer for the life of the session rather than one per record, so the
-    // task's high-water mark does not depend on how long a session lasts.
-    let mut scratch = alloc::vec![0u8; MAX_UPLINK_CLIENT_RECORD_LEN];
 
     // Two halves of one socket, for the reason `websocket.rs` gives where it does the same:
     // the read borrows only the reader, so the send side is an independent borrow and the read
@@ -563,7 +691,7 @@ async fn run(
     let mut routines_pending = false;
     let mut configuration_pending = false;
 
-    send_status(&mut socket_tx, &mut session).await?;
+    send_status(&mut socket_tx, &mut session, out).await?;
 
     // And the routine list, once, at the top of the session.
     //
@@ -573,11 +701,11 @@ async fn run(
     // is the refresh button, but a feature that only works when somebody presses something
     // is not the one that was designed. A no-op when the cache is still empty; see
     // `send_routine_list`.
-    send_routine_list(&mut socket_tx, &mut session).await?;
+    send_routine_list(&mut socket_tx, &mut session, out).await?;
 
     // And what the machine is. Once per session and never again: the hardware does not change
     // while the machine is switched on, so there is no interval and no pubsub arm for it.
-    send_machine_definition(&mut socket_tx, &mut session).await?;
+    send_machine_definition(&mut socket_tx, &mut session, out).await?;
 
     // And every setting it holds. Unlike the definition this *does* change while the machine
     // runs -- somebody turns a dial, or Plantlet sends a command -- so it also has an arm in
@@ -586,7 +714,7 @@ async fn run(
     // The bytes are remembered so that arm can tell a real change from the ten-second
     // reprint; see `send_configuration`.
     let mut last_configuration: Option<alloc::vec::Vec<u8>> = None;
-    send_configuration(&mut socket_tx, &mut session, &mut last_configuration, true).await?;
+    send_configuration(&mut socket_tx, &mut session, out, &mut last_configuration, true).await?;
 
     // The keepalive as a deadline rather than an idle timer; see `KEEPALIVE_INTERVAL`.
     let mut next_ping_at = Instant::now() + KEEPALIVE_INTERVAL;
@@ -599,7 +727,7 @@ async fn run(
     // rework is that they must not share a handler, only this tail of one.
     macro_rules! send_status_and_reschedule {
         () => {{
-            send_status(&mut socket_tx, &mut session).await?;
+            send_status(&mut socket_tx, &mut session, out).await?;
             last_status_sent_at = Instant::now();
 
             // Deferred pushes ride along with the status rather than waking the server on
@@ -607,11 +735,17 @@ async fn run(
             // setting that moved and moved back costs nothing.
             if routines_pending {
                 routines_pending = false;
-                send_routine_list(&mut socket_tx, &mut session).await?;
+                send_routine_list(&mut socket_tx, &mut session, out).await?;
             }
             if configuration_pending {
                 configuration_pending = false;
-                send_configuration(&mut socket_tx, &mut session, &mut last_configuration, false)
+                send_configuration(
+                    &mut socket_tx,
+                    &mut session,
+                    out,
+                    &mut last_configuration,
+                    false,
+                )
                     .await?;
             }
 
@@ -659,7 +793,7 @@ async fn run(
         let outcome = select(
             join(
                 async {
-                    let read = http::read_record(&mut socket_rx, pending, &mut scratch).await;
+                    let read = http::read_record(&mut socket_rx, pending, &mut scratch[..]).await;
                     frame_done.signal(());
                     read
                 },
@@ -743,14 +877,14 @@ async fn run(
                                         // Encoding here is safe from the usual hazard precisely
                                         // because this statement does not await: the 3.4 kB
                                         // `Configuration` is dropped at the semicolon and only a
-                                        // `Vec` handle reaches the arm. It is also cheaper than
+                                        // length reaches the arm. It is also cheaper than
                                         // the cache read it replaces, which cloned the whole
                                         // configuration back out on every publish.
                                         Either4::Third(Either::Second(WaitResult::Message(
                                             config,
-                                        ))) if !asleep => {
-                                            Wake::Configuration(encode_configuration(config))
-                                        }
+                                        ))) if !asleep => Wake::Configuration(
+                                            encode_configuration(&mut out.plain[..], config),
+                                        ),
                                         // Asleep, so there is nothing to encode -- the flush
                                         // reads the cache later, long after this race is over.
                                         // And on `Lagged` there is no message to encode, so the
@@ -832,7 +966,7 @@ async fn run(
                                         // against the publish: the application processor holds
                                         // the cache lock across both the publish and the write,
                                         // so there is no window where this observes the old list.
-                                        send_routine_list(&mut socket_tx, &mut session).await?;
+                                        send_routine_list(&mut socket_tx, &mut session, out).await?;
                                     }
                                 }
                                 // A setting changed -- at the machine's own panel, from the local
@@ -856,13 +990,14 @@ async fn run(
                                         // The message's own bytes, which is what makes a setting
                                         // change reach Plantlet at once rather than whenever the
                                         // republish happened to beat `cache_update_task`.
-                                        Some(plaintext) => {
+                                        Some(len) => {
                                             send_encoded_configuration(
                                                 &mut socket_tx,
                                                 &mut session,
+                                                out,
                                                 &mut last_configuration,
                                                 false,
-                                                plaintext,
+                                                len,
                                             )
                                             .await?
                                         }
@@ -873,6 +1008,7 @@ async fn run(
                                             send_configuration(
                                                 &mut socket_tx,
                                                 &mut session,
+                                                out,
                                                 &mut last_configuration,
                                                 false,
                                             )
@@ -946,6 +1082,7 @@ async fn run(
                     &mut session,
                     &scratch[..len],
                     &mut socket_tx,
+                    out,
                     &mut next_status_at,
                     &mut burst_remaining,
                     &mut last_configuration,
@@ -981,20 +1118,47 @@ async fn run(
 ///
 /// Taking the `Status` by value and returning bytes is what keeps it out: everything large
 /// lives on the stack for the duration of this call and is gone before the caller awaits.
-fn encode_status(status: variegated_controller_types::Status) -> Option<alloc::vec::Vec<u8>> {
-    postcard::to_allocvec(&UplinkMessage::Status(status)).ok()
+/// Encode into `plain`, returning the length written.
+///
+/// `to_slice` rather than `to_allocvec`: these ran twice per outbound message, once here and
+/// once for the sealed copy, at up to 1 Hz during a shot. See [`Buffers`].
+///
+/// A message too large for the buffer returns `None` and the caller drops it with a log line,
+/// which is the same graceful failure the heap version had when a message would not fit one
+/// record. [`UPLINK_MESSAGE_LEN`] says why that is not expected to happen.
+fn encode_status(
+    plain: &mut [u8],
+    status: variegated_controller_types::Status,
+) -> Option<usize> {
+    encode_message(plain, &UplinkMessage::Status(status))
 }
 
 fn encode_machine_definition(
+    plain: &mut [u8],
     definition: variegated_controller_types::MachineDefinition,
-) -> Option<alloc::vec::Vec<u8>> {
-    postcard::to_allocvec(&UplinkMessage::MachineDefinition(definition)).ok()
+) -> Option<usize> {
+    encode_message(plain, &UplinkMessage::MachineDefinition(definition))
 }
 
 fn encode_configuration(
+    plain: &mut [u8],
     configuration: variegated_controller_types::Configuration,
-) -> Option<alloc::vec::Vec<u8>> {
-    postcard::to_allocvec(&UplinkMessage::Configuration(configuration)).ok()
+) -> Option<usize> {
+    encode_message(plain, &UplinkMessage::Configuration(configuration))
+}
+
+/// The one place a `UplinkMessage` becomes bytes, so the size refusal is stated once.
+fn encode_message(plain: &mut [u8], message: &UplinkMessage) -> Option<usize> {
+    match postcard::to_slice(message, plain) {
+        Ok(written) => Some(written.len()),
+        Err(_) => {
+            log_warn!(
+                "Uplink: a message will not fit {} bytes, dropping it",
+                plain.len()
+            );
+            None
+        }
+    }
 }
 
 /// Send every setting the machine holds, and its schedules.
@@ -1028,18 +1192,22 @@ fn encode_configuration(
 async fn send_configuration(
     writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
+    out: &mut Out<'_>,
     last: &mut Option<alloc::vec::Vec<u8>>,
     force: bool,
 ) -> Result<bool, AttemptEnd> {
-    let Some(plaintext) = ({
+    let Some(len) = ({
         let guard = channels::CONFIG_CACHE.lock().await;
-        guard.as_ref().cloned().and_then(encode_configuration)
+        guard
+            .as_ref()
+            .cloned()
+            .and_then(|config| encode_configuration(&mut out.plain[..], config))
     }) else {
         log_warn!("Uplink: no configuration cached yet, nothing to send");
         return Ok(false);
     };
 
-    send_encoded_configuration(writer, session, last, force, plaintext).await
+    send_encoded_configuration(writer, session, out, last, force, len).await
 }
 
 /// Send a configuration whose bytes are already in hand, if they differ from the last one sent.
@@ -1049,19 +1217,28 @@ async fn send_configuration(
 /// the narrowing site in [`run`] for the race that makes the difference. Everything from the
 /// comparison onward is identical either way, and must stay one path: `last` is what makes the
 /// ten-second republish free, and two places updating it would drift.
+/// `len` is how much of `out.plain` the encoded configuration occupies.
+///
+/// `last` stays a heap `Vec` and is deliberately *not* one of the buffers moved to `.bss`.
+/// It is a few hundred bytes -- postcard encodes only the occupied entries of those
+/// fixed-size maps -- where a static sized for the worst case would be several kilobytes, and
+/// after the encode buffer above it is written only when the configuration genuinely changes
+/// rather than on each of the six republishes a minute. The comment above also records why it
+/// holds bytes rather than a hash, and that reasoning is unchanged.
 async fn send_encoded_configuration(
     writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
+    out: &mut Out<'_>,
     last: &mut Option<alloc::vec::Vec<u8>>,
     force: bool,
-    plaintext: alloc::vec::Vec<u8>,
+    len: usize,
 ) -> Result<bool, AttemptEnd> {
-    if !force && last.as_deref() == Some(plaintext.as_slice()) {
+    if !force && last.as_deref() == Some(&out.plain[..len]) {
         return Ok(false);
     }
 
-    *last = Some(plaintext.clone());
-    send_message(writer, session, plaintext).await?;
+    *last = Some(out.plain[..len].to_vec());
+    send_message(writer, session, &out.plain[..len], &mut out.sealed[..]).await?;
     Ok(true)
 }
 
@@ -1077,19 +1254,23 @@ async fn send_encoded_configuration(
 async fn send_machine_definition(
     writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
+    out: &mut Out<'_>,
 ) -> Result<(), AttemptEnd> {
     // Scoped and cloned out, like `send_status`: the guard is also taken by the receiver task
     // that fills it, and holding it across a socket write would block that for as long as the
     // network takes.
-    let Some(plaintext) = ({
+    let Some(len) = ({
         let guard = channels::MACHINE_DEFINITION.lock().await;
-        guard.as_ref().cloned().and_then(encode_machine_definition)
+        guard
+            .as_ref()
+            .cloned()
+            .and_then(|definition| encode_machine_definition(&mut out.plain[..], definition))
     }) else {
         log_warn!("Uplink: no machine definition yet, nothing to send");
         return Ok(());
     };
 
-    send_message(writer, session, plaintext).await
+    send_message(writer, session, &out.plain[..len], &mut out.sealed[..]).await
 }
 
 /// Send the current status, read from the cache the HTTP server already keeps.
@@ -1110,12 +1291,16 @@ async fn send_machine_definition(
 async fn send_status(
     writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
+    out: &mut Out<'_>,
 ) -> Result<(), AttemptEnd> {
     // Scoped so the guard is released and the `Status` clone dropped before the send: the
     // clone is 2.4 kB and the lock is also taken by the task that keeps the cache current.
-    let Some(plaintext) = ({
+    let Some(len) = ({
         let guard = channels::STATUS_CACHE.lock().await;
-        guard.as_ref().cloned().and_then(encode_status)
+        guard
+            .as_ref()
+            .cloned()
+            .and_then(|status| encode_status(&mut out.plain[..], status))
     }) else {
         // Nothing cached yet, or it would not serialise. Not an error: the machine may have
         // only just booted, and the next interval will find one.
@@ -1123,7 +1308,7 @@ async fn send_status(
         return Ok(());
     };
 
-    send_message(writer, session, plaintext).await
+    send_message(writer, session, &out.plain[..len], &mut out.sealed[..]).await
 }
 
 /// What the server asked for, narrowed out of the envelope.
@@ -1201,6 +1386,7 @@ async fn handle(
     session: &mut UplinkSession,
     record: &[u8],
     writer: &mut TcpWriter<'_>,
+    out: &mut Out<'_>,
     next_status_at: &mut Instant,
     burst_remaining: &mut u8,
     last_configuration: &mut Option<alloc::vec::Vec<u8>>,
@@ -1250,12 +1436,12 @@ async fn handle(
             *next_status_at = Instant::now();
             Ok(())
         }
-        Downlink::RequestRoutineList => send_routine_list(writer, session).await,
-        Downlink::RequestMachineDefinition => send_machine_definition(writer, session).await,
+        Downlink::RequestRoutineList => send_routine_list(writer, session, out).await,
+        Downlink::RequestMachineDefinition => send_machine_definition(writer, session, out).await,
         // Forced: the server asked, so it gets an answer whether or not the bytes have moved
         // since the last one.
         Downlink::RequestConfiguration => {
-            send_configuration(writer, session, last_configuration, true)
+            send_configuration(writer, session, out, last_configuration, true)
                 .await
                 .map(|_| ())
         }
@@ -1294,14 +1480,14 @@ async fn handle(
             // Encoded and sent in separate statements, like every other reply here: a
             // `QueryOk::RoutineDefinition` owns a couple of kilobytes and must not be alive
             // across the write.
-            let Some(plaintext) = encode_reply(id, outcome) else {
+            let Some(len) = encode_reply(&mut out.plain[..], id, outcome) else {
                 // A routine too large to fit one record. Nothing is sent, so the server's
                 // query times out on its own side rather than being told a lie -- and the
                 // slot keeps its null CRC, so the next listing asks again.
                 log_warn!("Uplink: a query reply would not encode, dropping it");
                 return Ok(());
             };
-            send_message(writer, session, plaintext).await
+            send_message(writer, session, &out.plain[..len], &mut out.sealed[..]).await
         }
     }
 }
@@ -1310,13 +1496,16 @@ async fn handle(
 ///
 /// Synchronous, for the reason [`encode_status`] gives: `UplinkMessage` is 2.4 kB by value, so
 /// one still alive across a socket write would live in this task's future forever.
-fn encode_reply(id: u32, outcome: QueryOutcome) -> Option<alloc::vec::Vec<u8>> {
-    postcard::to_allocvec(&UplinkMessage::Reply { id, outcome }).ok()
+fn encode_reply(plain: &mut [u8], id: u32, outcome: QueryOutcome) -> Option<usize> {
+    encode_message(plain, &UplinkMessage::Reply { id, outcome })
 }
 
-/// Serialise a routine listing into a heap buffer. Synchronous, as above.
-fn encode_routine_list(list: &RoutineSummaryList) -> Option<alloc::vec::Vec<u8>> {
-    postcard::to_allocvec(&UplinkMessage::RoutineList(RoutineSummaryStorage::from_list(list))).ok()
+/// Serialise a routine listing into the encode buffer. Synchronous, as above.
+fn encode_routine_list(plain: &mut [u8], list: &RoutineSummaryList) -> Option<usize> {
+    encode_message(
+        plain,
+        &UplinkMessage::RoutineList(RoutineSummaryStorage::from_list(list)),
+    )
 }
 
 /// Answer a routine-list request from the cache the application processor keeps filled.
@@ -1335,19 +1524,22 @@ fn encode_routine_list(list: &RoutineSummaryList) -> Option<alloc::vec::Vec<u8>>
 async fn send_routine_list(
     writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
+    out: &mut Out<'_>,
 ) -> Result<(), AttemptEnd> {
     // The guard is released before the send: it is also taken by the update path that keeps
     // the cache current, and holding it across a socket write would block that for as long as
     // the network takes.
-    let Some(plaintext) = ({
+    let Some(len) = ({
         let guard = channels::ROUTINE_CACHE.lock().await;
-        guard.as_ref().and_then(encode_routine_list)
+        guard
+            .as_ref()
+            .and_then(|list| encode_routine_list(&mut out.plain[..], list))
     }) else {
         log_warn!("Uplink: no routine list to send yet");
         return Ok(());
     };
 
-    send_message(writer, session, plaintext).await
+    send_message(writer, session, &out.plain[..len], &mut out.sealed[..]).await
 }
 
 /// Stream one shot onto the socket as a single sealed record.
@@ -1503,11 +1695,26 @@ async fn send_shot(
 async fn send_message(
     writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
-    plaintext: alloc::vec::Vec<u8>,
+    plaintext: &[u8],
+    sealed: &mut [u8],
 ) -> Result<(), AttemptEnd> {
     log_info!("Uplink: sending a {}-byte message", plaintext.len());
-    let mut sealed = alloc::vec![0u8; UplinkSession::sealed_len(plaintext.len())];
-    let len = match session.seal_record(&plaintext, &mut sealed) {
+
+    // Checked against the real `sealed_len` rather than against `sealed_len_const`, so the
+    // const arithmetic beside [`UPLINK_SEALED_LEN`] stays a sizing hint and this stays the
+    // thing that decides. `seal_record` would refuse anyway; this says so in bytes.
+    let needed = UplinkSession::sealed_len(plaintext.len());
+    if needed > sealed.len() {
+        log_warn!(
+            "Uplink: a {}-byte message needs {} sealed bytes against {}, dropping it",
+            plaintext.len(),
+            needed,
+            sealed.len()
+        );
+        return Ok(());
+    }
+
+    let len = match session.seal_record(plaintext, sealed) {
         Ok(len) => len,
         Err(_) => {
             log_warn!(
@@ -1517,7 +1724,6 @@ async fn send_message(
             return Ok(());
         }
     };
-    drop(plaintext);
 
     http::write_record(writer, &sealed[..len]).await.map_err(|_| {
         // The likeliest way a session dies, and the one that says least from the far end:

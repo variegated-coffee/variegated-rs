@@ -638,7 +638,19 @@ async fn main(spawner: Spawner) -> ! {
     // `scripts/memory-report.sh` are single futures with big inline buffers:
     // `application_processor_task` 18896, `http_server_task` 17696, `esphome_server_task`
     // 17104, `debug_tcp_task` 9040, `websocket_server_task` 7008.
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    //
+    // # 64 kB less 18,520, and the subtraction is the point
+    //
+    // The uplink's five long-lived buffers -- TCP rx and tx, the record scratch, and the
+    // encode/seal pair -- moved from this heap into `.bss` (`uplink::Buffers`). Every byte of
+    // that is a byte this line must give back, or the move is a raid on `.stack` rather than
+    // a change of allocation strategy: `.bss` and this allocator compete for the same RWDATA
+    // remainder, one for one.
+    //
+    // 2816 + 4096 + 2304 + 4608 + 4696 = 18520. Keep the two in step. If those buffers are
+    // resized, this number moves with them, and `.stack` should not move at all -- which is
+    // the check that the trade was made honestly.
+    esp_alloc::heap_allocator!(size: 64 * 1024 - 18520);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
