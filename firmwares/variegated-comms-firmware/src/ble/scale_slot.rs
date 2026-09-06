@@ -21,15 +21,20 @@
 //! The driver future is boxed once per assignment, and the note at its allocation site in
 //! `devices.rs` records the panic that taught us to care: `memory allocation of 12000
 //! bytes failed`, a *contiguity* failure inside one `esp_alloc` region rather than a
-//! shortage. What keeps that allocation small is that the arms of the `match` are mutually
-//! exclusive, so rustc overlaps their locals in the coroutine and the box is
-//! `max(belka, acaia, bookoo)` rather than their sum.
+//! shortage. Each `match` arm there is boxed separately, so this function's future is
+//! allocated at its own size -- 6624 bytes for the ACAIA -- and never at the size of the
+//! heaviest driver compiled in.
 //!
-//! An enum session would destroy that. A notification stream borrows its GATT client, and
-//! a self-referential pair cannot live in one struct -- so both clients would have to be
-//! function-scope `Option`s, live across every await, and therefore both present in the
-//! coroutine at once. That is the sum, in the one direction the contiguity failure says
-//! not to go.
+//! An enum session would still be worse, and for a reason boxing does not address. A
+//! notification stream borrows its GATT client, and a self-referential pair cannot live in
+//! one struct -- so both clients would have to be function-scope `Option`s, live across
+//! every await, and therefore both present in the coroutine *simultaneously*. That is a
+//! sum under any layout, and a `GattClient` is 2448 bytes.
+//!
+//! Which is worth stating precisely, because this frame already holds two of them: one
+//! inside the `connect` future and one in the local it lands in. Measured -- halving the
+//! GATT notification queue took 2096 bytes off a `GattClient` and 4192 off this future.
+//! An enum would make that three or four, not two.
 //!
 //! The generic costs one extra copy of this function's machine code, which is the same
 //! code a hand-written second loop would have cost anyway.

@@ -399,14 +399,46 @@ pub async fn ble_slot_task(
             continue;
         };
 
-        // Boxed, and the history matters because the obvious reading of it is wrong.
+        // Boxed per arm, and the history matters because the obvious reading of it is wrong.
         //
-        // This future is about 10 kB -- the ACAIA arm dominates, carrying a
-        // `FlowEstimator` with a sample deque, a median window and a Kalman filter. Left
-        // inline it is part of the task future, which `pool_size` allocates
+        // Left inline this future is part of the task future, which `pool_size` allocates
         // `MAX_BLUETOOTH_PERIPHERALS` times in `.bss` whether or not anything is
-        // associated; boxed, it costs one allocation per *connected* peripheral and hands
+        // associated; boxed, it costs one allocation per *associated* peripheral and hands
         // 41 kB back to `.stack`, which is the SRAM remainder.
+        //
+        // **Each arm gets its own box, rather than one box around the whole `match`.**
+        // A single box is sized `max(all arms)`, so every peripheral pays for the heaviest
+        // driver compiled in: a dial was allocating 10816 bytes for scale machinery it does
+        // not have. Per arm it allocates exactly the driver that was chosen. Smaller blocks
+        // are also the friendlier shape for the contiguity failure described below.
+        //
+        // Measured with a compile-time probe, before and after the notification-queue change
+        // recorded beside `trouble-host` in `Cargo.toml`:
+        //
+        //     belka     10040 -> 5848      AcaiaNew  10816 -> 6624
+        //     AcaiaOld  10608 -> ~6400     Bookoo    10616 -> ~6400
+        //     Ulanzi     6160 -> 4064
+        //
+        // So a dial now costs 4064 where it used to cost 10816, and a scale 6624.
+        //
+        // Note what those deltas say. The queue change took 2096 bytes off a `GattClient`,
+        // and it took **4192** off every scale and belka frame -- exactly twice -- so those
+        // futures hold two clients live at once, one in the `connect` future and one in the
+        // local it lands in. The dial's frame moved by 2096, so it holds one. That is worth
+        // knowing before anyone tries to shrink these further: the client is not merely the
+        // largest thing in the frame, it is in there twice.
+        //
+        // Boxing per arm also retires a question this code used to rest on. A single box is
+        // `max` rather than `sum` only if rustc overlaps the locals of mutually exclusive
+        // arms in the coroutine -- a layout optimisation, not a guarantee, and the gap was
+        // 10816 against 48240. Per arm there is nothing to overlap and nothing to promise.
+        // `scale_slot`'s module doc argues against an enum of state machines on related
+        // grounds, and that argument still stands: it is about two GATT clients live
+        // *simultaneously*, which is the sum under any layout.
+        //
+        // What it costs is one vtable indirection per poll, against a BLE notification rate.
+        //
+        // `FlowEstimator`, which this note used to blame for the size, is 296 bytes.
         //
         // Boxing it the first time panicked the machine with
         // `memory allocation of 12000 bytes failed`. That was not a shortage of heap --
@@ -427,87 +459,73 @@ pub async fn ble_slot_task(
         // assignment changes. So this runs when a user associates or removes a
         // peripheral -- long-lived, few and large, which is the least fragmenting shape
         // for this allocator.
-        let driver = alloc::boxed::Box::pin(async {
-            match assignment.driver {
-                BluetoothDriverKind::BelkaPortal => {
-                    belka_measurement_loop(
-                        handle.clone(),
-                        stack,
-                        BdAddr::new(assignment.address),
-                        assignment.id,
-                        slot,
-                        sensor_sender,
-                        &mut brew_sensor_commands,
-                    )
-                    .await
-                }
-                BluetoothDriverKind::AcaiaOld => {
-                    run_scale_slot::<AcaiaOld>(
-                        handle.clone(),
-                        stack,
-                        BdAddr::new(assignment.address),
-                        assignment.id,
-                        slot,
-                        sensor_sender,
-                        &mut scale_commands,
-                    )
-                    .await
-                }
-                BluetoothDriverKind::AcaiaNew => {
-                    run_scale_slot::<AcaiaNew>(
-                        handle.clone(),
-                        stack,
-                        BdAddr::new(assignment.address),
-                        assignment.id,
-                        slot,
-                        sensor_sender,
-                        &mut scale_commands,
-                    )
-                    .await
-                }
-                BluetoothDriverKind::Bookoo => {
-                    run_scale_slot::<Bookoo>(
-                        handle.clone(),
-                        stack,
-                        BdAddr::new(assignment.address),
-                        assignment.id,
-                        slot,
-                        sensor_sender,
-                        &mut scale_commands,
-                    )
-                    .await
-                }
-                BluetoothDriverKind::UlanziD100H => {
-                    // Neither `sensor_sender` nor a command subscriber: this device reports
-                    // no readings and takes no operations. It sends UI commands, on a
-                    // channel of their own, and it is the only driver here that pairs.
-                    crate::ble::ulanzi_slot::ulanzi_input_loop(
-                        handle.clone(),
-                        stack,
-                        BdAddr::new(assignment.address),
-                        assignment.id,
-                        slot,
-                        input_sender,
-                        bond_sender,
-                    )
-                    .await
-                }
+        let driver: core::pin::Pin<
+            alloc::boxed::Box<dyn core::future::Future<Output = ()> + '_>,
+        > = match assignment.driver {
+            BluetoothDriverKind::BelkaPortal => alloc::boxed::Box::pin(belka_measurement_loop(
+                handle.clone(),
+                stack,
+                BdAddr::new(assignment.address),
+                assignment.id,
+                slot,
+                sensor_sender,
+                &mut brew_sensor_commands,
+            )),
+            BluetoothDriverKind::AcaiaOld => alloc::boxed::Box::pin(run_scale_slot::<AcaiaOld>(
+                handle.clone(),
+                stack,
+                BdAddr::new(assignment.address),
+                assignment.id,
+                slot,
+                sensor_sender,
+                &mut scale_commands,
+            )),
+            BluetoothDriverKind::AcaiaNew => alloc::boxed::Box::pin(run_scale_slot::<AcaiaNew>(
+                handle.clone(),
+                stack,
+                BdAddr::new(assignment.address),
+                assignment.id,
+                slot,
+                sensor_sender,
+                &mut scale_commands,
+            )),
+            BluetoothDriverKind::Bookoo => alloc::boxed::Box::pin(run_scale_slot::<Bookoo>(
+                handle.clone(),
+                stack,
+                BdAddr::new(assignment.address),
+                assignment.id,
+                slot,
+                sensor_sender,
+                &mut scale_commands,
+            )),
+            // Neither `sensor_sender` nor a command subscriber: this device reports no
+            // readings and takes no operations. It sends UI commands, on a channel of their
+            // own, and it is the only driver here that pairs.
+            BluetoothDriverKind::UlanziD100H => {
+                alloc::boxed::Box::pin(crate::ble::ulanzi_slot::ulanzi_input_loop(
+                    handle.clone(),
+                    stack,
+                    BdAddr::new(assignment.address),
+                    assignment.id,
+                    slot,
+                    input_sender,
+                    bond_sender,
+                ))
             }
-        });
+        };
 
         // What the note above asserts, measured rather than assumed.
         //
-        // The whole memory argument for a third driver arm rests on rustc overlapping the
-        // locals of mutually exclusive `match` arms in a coroutine, so that this box stays
-        // `max(belka, acaia, bookoo)` rather than becoming their sum. That is a claim about
-        // a layout optimisation, not a guarantee, and the "about 10 kB" figure it is
-        // compared against had no measurement behind it either.
+        // This line only started meaning something when the arms were boxed separately.
+        // Against a single box it read `size_of_val` on one concrete coroutine type, so it
+        // printed the same constant whichever driver was assigned -- and the test it used to
+        // describe here, "associate an ACAIA and then a BooKoo and compare", could not have
+        // failed. Over a `dyn Future` it reads the size out of the vtable, so it now reports
+        // what *this* peripheral actually allocated.
         //
-        // One line, logged once per assignment rather than per reconnect, is enough to
-        // settle both: associate an ACAIA and then a BooKoo and compare. Roughly equal
-        // numbers mean the overlap held; roughly the sum means it did not, and this design
-        // needs revisiting before it ships -- which is the one question here that can panic
-        // the machine, given the `memory allocation of 12000 bytes failed` above.
+        // Logged once per assignment rather than per reconnect. Worth reading against the
+        // `memory allocation of 12000 bytes failed` above: this is the block size that
+        // panic was about.
         log_info!(
             "BLE slot {} driver future: {} bytes",
             slot,
