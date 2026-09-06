@@ -36,6 +36,21 @@ use crate::ws_types::{ClientQuery, WsMessage, MAX_CLIENT_FRAME_LEN, MAX_WS_FRAME
 /// depend on it: a client cannot tell which side of it a message landed on.
 const WS_INLINE_FRAME_LEN: usize = 256;
 
+/// Size of the buffer every server-originated payload is encoded into.
+///
+/// **Not [`MAX_WS_FRAME_LEN`], and the difference is deliberate.** That constant is the
+/// *protocol's* ceiling, shared with the frontend and enforced in [`encode_ws_message`]; this
+/// is how much room the encoder actually needs. `WsMessage` is 4,192 bytes in memory and
+/// postcard does not encode these types larger than that -- fixed-width scalars stay fixed
+/// width, `Option`s cost a tag against a whole niche, and the fixed-size maps encode only
+/// their occupied entries -- so this carries about 10% over the largest possible message.
+///
+/// Sized down from 8,192 because the heap it is paid for out of was reading 600-2,000 bytes
+/// free with nothing connected. A message between this and `MAX_WS_FRAME_LEN` would now fail
+/// to encode rather than being encoded and rejected; both are refusals with a log line, and
+/// the size argument above says neither should be reachable.
+const WS_ENCODE_LEN: usize = 4608;
+
 /// Where an inbound frame's payload ended up.
 ///
 /// Two cases rather than always-heap because most frames on this socket are a handful of
@@ -248,7 +263,7 @@ async fn handle_websocket_connection(
     //
     // A local of this function rather than a `mk_static!`: it costs the same bytes -- this
     // task's future is a `.bss` `POOL` either way -- and needs no argument about second takes.
-    let mut encode_buf = [0u8; MAX_WS_FRAME_LEN];
+    let mut encode_buf = [0u8; WS_ENCODE_LEN];
 
     // Split socket into read and write halves for concurrent access
     let (mut socket_rx, mut socket_tx) = socket.split();

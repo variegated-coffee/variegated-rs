@@ -45,15 +45,19 @@ const SHOT_LOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_se
 
 /// Ceiling on a `POST`/`PUT /schedules` body.
 ///
-/// [`MAX_CLIENT_FRAME_LEN`] rather than a number of its own, for the reason the paragraph
-/// above gives about `ROUTINE_BODY_LIMIT`: the two ways into this machine should agree on what
-/// is too big, and reusing the constant is what keeps them agreeing without a second argument
-/// to maintain.
+/// **Sized against a `ScheduleItem`, which is 92 bytes**, so this is not quite three of them.
 ///
-/// Generous by any measure -- a `ScheduleItem` is 92 bytes, so this is twenty-five of them.
-/// The predecessor was 8192, allocated on the heap per request, which was both the largest
-/// contiguous request in the firmware and eighty-nine times the payload.
-const SCHEDULE_BODY_LIMIT: usize = crate::ws_types::MAX_CLIENT_FRAME_LEN;
+/// It briefly borrowed [`crate::ws_types::MAX_CLIENT_FRAME_LEN`], on the reasoning the
+/// `ROUTINE_BODY_LIMIT` paragraph above gives about the two ways into this machine agreeing on
+/// what is too big. That reasoning is about *routines*, and routines do not come through here
+/// any more -- both callers deserialise a `ScheduleItem` -- so it was borrowing a bound from a
+/// payload this route cannot carry, at twenty-five times what it needs. The predecessor to
+/// both was 8192 allocated on the heap per request, which was the largest contiguous request
+/// in the firmware and eighty-nine times the payload.
+///
+/// A body over this is truncated and then fails to deserialise, which is a bad request either
+/// way -- the same shape the 8192 version had, at a lower threshold.
+const SCHEDULE_BODY_LIMIT: usize = 256;
 
 /// Turn a refusal from the application processor into something worth showing a user.
 ///

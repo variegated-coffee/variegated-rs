@@ -663,19 +663,36 @@ async fn main(spawner: Spawner) -> ! {
     // arrive as `POOL` growth: measured, `.bss` +13392 and `.stack` -13392 before this line
     // was adjusted, which is the one-for-one competition stated exactly.
     //
-    // 18520 + 5632 + 13392 = 37544.
+    // 18520 + 5632 + 13392 = 37544, less what came back when those buffers were right-sized
+    // against what they actually hold rather than against the nearest round number:
     //
-    // **This leaves 64 kB reclaimed + 27992 here = 92536 of heap, down from 122880.** That is
-    // a large reduction and it is deliberate, but note what it rests on: the demand removed
-    // across these four changes is bigger than the capacity removed -- the BLE driver boxes,
-    // the uplink's per-message pair, the uploader's 4 kB transmit buffer, an 8 kB body per
-    // POST and up to ~16 kB transiently per WebSocket frame, against 37544 of capacity. The
-    // arithmetic says there is more room than before, not less.
+    //     websocket encode   8192 -> 4608   `WsMessage` is 4192 in memory
+    //     http body          2304 ->  256   a `ScheduleItem` is 92 bytes
+    //     uplink tx          4096 -> 3072   2 MSS is 2904
+    //     upload tx          4096 -> 3072   likewise
     //
-    // **It has not been measured on the machine.** `Heap high-water` from the 1 Hz snapshot
-    // is the number that settles it, and the 82356 figure quoted above predates all of it.
-    // Read it before shrinking this line any further.
-    esp_alloc::heap_allocator!(size: 64 * 1024 - 37544);
+    // **10848, measured, not the 9728 those four subtractions predict.** The difference is the
+    // HTTP body array: it is a local of a handler arm, so it appears once per call site per
+    // handler slot rather than once per slot, and the estimate counted it twice instead of
+    // four times. Which is the argument for setting this line from `.stack` rather than from
+    // arithmetic: build, read the section, and return whatever moved.
+    //
+    // 37544 - 10848 = 26696.
+    //
+    // **This leaves 64 kB reclaimed + 38840 here = 103376 of heap, against 122880 before any
+    // of it.** The capacity removed is smaller than the demand removed -- the BLE driver
+    // boxes, the uplink's per-message pair, the uploader's 4 kB transmit buffer, an 8 kB body
+    // per POST and up to ~16 kB transiently per WebSocket frame.
+    //
+    // **That is arithmetic, and the machine disagrees with it.** With three peripherals
+    // enabled and none connected the reading was 600-2000 bytes free, which no accounting of
+    // this firmware's own allocations explains. The named suspects are the Wi-Fi driver's
+    // dynamic buffer pool -- see the note below, where 43 kB is recorded as acquired during a
+    // reconnect and never returned -- the BLE controller's per-link state at
+    // `max_connections: 6`, `r_esp_ble_msys_init`'s 10752, and the per-association driver
+    // boxes in `ble/devices.rs`, which are held for peripherals that are merely *enabled*.
+    // Right-sizing these buffers is worth ~10 kB and is not by itself the answer.
+    esp_alloc::heap_allocator!(size: 64 * 1024 - 26696);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

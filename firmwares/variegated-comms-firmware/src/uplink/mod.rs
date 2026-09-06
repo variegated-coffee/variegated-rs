@@ -214,7 +214,11 @@ const TCP_RX_LEN: usize = MAX_UPLINK_CLIENT_RECORD_LEN + 512;
 
 /// Transmit buffer, two maximum segments, matching the upload path's reasoning: under 2 MSS
 /// interacts badly with Nagle.
-const TCP_TX_LEN: usize = 4096;
+///
+/// 3072 rather than the 4096 it was, because 2 MSS is 2 x 1452 = 2904 and the rest was slack
+/// this firmware could not afford: the heap that pays for this buffer was reading 600-2,000
+/// bytes free. **2904 is the floor, not a target** -- do not take this below it.
+const TCP_TX_LEN: usize = 3072;
 
 /// The three long-lived buffers a session needs, in `.bss` rather than on the heap.
 ///

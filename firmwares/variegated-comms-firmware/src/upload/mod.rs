@@ -118,8 +118,12 @@ const TCP_RX_LEN: usize = 1536;
 
 /// Transmit buffer, sized against two maximum segments (2 x 1452) for the same reason the
 /// HTTP server's is: under 2 MSS interacts badly with Nagle. Shot bytes arrive 1 kB at a
-/// time, so this is several chunks of runway.
-const TCP_TX_LEN: usize = 4096;
+/// time, so this is still two chunks of runway on top of the segment floor.
+///
+/// 3072 rather than the 4096 it was, for the reason the uplink's twin gives: 2904 is the
+/// floor and the rest was slack against a heap reading 600-2,000 bytes free. **Do not take
+/// this below 2904.**
+const TCP_TX_LEN: usize = 3072;
 
 /// The socket buffers, in `.bss` rather than on the heap.
 ///
