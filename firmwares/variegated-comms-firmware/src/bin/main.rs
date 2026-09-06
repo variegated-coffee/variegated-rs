@@ -650,7 +650,14 @@ async fn main(spawner: Spawner) -> ! {
     // 2816 + 4096 + 2304 + 4608 + 4696 = 18520. Keep the two in step. If those buffers are
     // resized, this number moves with them, and `.stack` should not move at all -- which is
     // the check that the trade was made honestly.
-    esp_alloc::heap_allocator!(size: 64 * 1024 - 18520);
+    //
+    // The shot uploader's socket buffers followed, for 1536 + 4096 = 5632 more. That pair was
+    // not a tidying-up: `vec::from_elem(0u8, 4096)` for the transmit buffer is the allocation
+    // that panicked with `memory allocation of 4096 bytes failed` mid-upload, while the 1536
+    // beside it succeeded -- fragmentation, not exhaustion. See `upload::Buffers`.
+    //
+    // 18520 + 5632 = 24152.
+    esp_alloc::heap_allocator!(size: 64 * 1024 - 24152);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

@@ -121,6 +121,49 @@ const TCP_RX_LEN: usize = 1536;
 /// time, so this is several chunks of runway.
 const TCP_TX_LEN: usize = 4096;
 
+/// The socket buffers, in `.bss` rather than on the heap.
+///
+/// **This is the allocation that panicked**, and the backtrace named it exactly:
+///
+///     Executor::run -> shot_upload_task::poll -> alloc::vec::from_elem::<u8>
+///       -> raw_vec::handle_error -> handle_alloc_error -> panic
+///
+///     memory allocation of 4096 bytes failed
+///
+/// 4096 is `TCP_TX_LEN`, and the tell is that `rx` -- 1536 bytes, requested on the line
+/// before -- succeeded. That is fragmentation rather than exhaustion: the region had the
+/// bytes and not one contiguous run of them. `esp_alloc` gives each region its own
+/// `linked_list_allocator::Heap` and an allocation must fit inside one, so the largest single
+/// request is the one that fails first, and this was it.
+///
+/// Static, the request does not exist, so no arrangement of the heap can refuse it. The heap
+/// gives back the same 5,632 bytes in `bin/main.rs`, exactly as [`crate::uplink::Buffers`]
+/// does -- see the note there for why `.bss` and this allocator are the same resource and the
+/// trade is therefore even.
+///
+/// **Sound because `shot_upload_task` is a singleton**: no `pool_size`, so one instance and
+/// one owner. A second uploader would need a second pair.
+///
+/// What this does *not* remove is `EnvelopeSource::chunk`'s `Vec::with_capacity`, one per
+/// kilobyte of shot. That is churn, and it is the likeliest thing fragmenting the region in
+/// the first place -- but the buffer is `Chunk::bytes`, a `Vec` in `variegated-shot-upload`'s
+/// public `ChunkSource` trait, so removing it is an API change in a crate with its own tests
+/// and a second consumer in the uplink. Same-size blocks also recycle far better than one
+/// large one, which is why a 1 kB request never failed here while the 4 kB one did.
+struct Buffers {
+    rx: [u8; TCP_RX_LEN],
+    tx: [u8; TCP_TX_LEN],
+}
+
+impl Buffers {
+    const fn new() -> Self {
+        Self {
+            rx: [0; TCP_RX_LEN],
+            tx: [0; TCP_TX_LEN],
+        }
+    }
+}
+
 /// Why one attempt did not upload the shot.
 ///
 /// No `defmt::Format`: it wraps `UploadOutcome`, from a crate with no defmt dependency.
@@ -278,6 +321,10 @@ pub async fn shot_upload_task(
         park("Shot upload: no TRNG; uploads disabled", "rng").await
     };
 
+    // Taken once, here, for the same reason the `Trng` above is: `mk_static!` panics on a
+    // second take and this task loops over uploads forever. See [`Buffers`].
+    let buffers = crate::mk_static!(Buffers, Buffers::new());
+
     let mut config_rx = channels::SHOT_UPLOAD_CONFIG
         .receiver()
         .expect("the upload config watch is sized for this receiver");
@@ -345,7 +392,7 @@ pub async fn shot_upload_task(
                         continue;
                     }
 
-                    upload_shot(&mut rng, stack, config, &entry).await;
+                    upload_shot(&mut rng, stack, buffers, config, &entry).await;
                 }
             }
         }
@@ -367,6 +414,7 @@ async fn park(message: &str, reason: &'static str) -> ! {
 async fn upload_shot(
     rng: &mut esp_hal::rng::Trng,
     stack: Stack<'_>,
+    buffers: &mut Buffers,
     config: &ShotUploadConfig,
     entry: &ShotLogListEntry,
 ) {
@@ -415,6 +463,7 @@ async fn upload_shot(
             attempt_upload(
                 rng,
                 stack,
+                buffers,
                 endpoint.as_str(),
                 server_key.as_str(),
                 device_key.as_str(),
@@ -531,6 +580,7 @@ async fn upload_shot(
 async fn attempt_upload(
     rng: &mut esp_hal::rng::Trng,
     stack: Stack<'_>,
+    buffers: &mut Buffers,
     endpoint: &str,
     server_key: &str,
     device_key: &str,
@@ -606,11 +656,10 @@ async fn attempt_upload(
         AttemptError::Link
     })?;
 
-    // `vec![0u8; n]` rather than `Box::new([0u8; n])`: the latter builds the array on the
-    // stack first, and this task is polled on the one executor stack everything shares.
-    let mut rx = vec::from_elem(0u8, TCP_RX_LEN);
-    let mut tx = vec::from_elem(0u8, TCP_TX_LEN);
-    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    // Static now, not `vec::from_elem`. See [`Buffers`] -- the 4 kB `tx` request here is the
+    // one that panicked, and it panicked against a heap that had the bytes but not
+    // contiguously.
+    let mut socket = TcpSocket::new(stack, &mut buffers.rx[..], &mut buffers.tx[..]);
     socket.set_timeout(Some(SOCKET_TIMEOUT));
     socket
         .connect(embassy_net::IpEndpoint::new(addr, url.port))
