@@ -955,14 +955,22 @@ impl<
         let control_state = self.configuration.persistent.brew_boiler.control_state;
         let mut brew_pv = match self.configuration.effective_brew_boiler_control_mode() {
             BoilerControlMode::Temperature => {
+                let Some(temp) = self.brew_boiler.get_temperature() else {
+                    self.brew_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
+                    return Output::Off;
+                };
                 self.brew_boiler_pid.setpoint = control_state.values.target_temperature as f32;
                 self.brew_boiler_pid.set_parameters(self.configuration.persistent.brew_boiler.temperature_pid_parameters);
-                self.brew_boiler.get_temperature().unwrap_or(0.0) as f32
+                temp as f32
             }
             BoilerControlMode::Pressure => {
+                let Some(pressure) = self.brew_boiler.get_pressure() else {
+                    self.brew_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
+                    return Output::Off;
+                };
                 self.brew_boiler_pid.setpoint = control_state.values.target_pressure as f32;
                 self.brew_boiler_pid.set_parameters(self.configuration.persistent.brew_boiler.pressure_pid_parameters);
-                self.brew_boiler.get_pressure().unwrap_or(0.0) as f32
+                pressure as f32
             }
             BoilerControlMode::Off => {
                 self.brew_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
@@ -978,34 +986,20 @@ impl<
         let mut brew_demand = brew_pid_out.out.max(0.0);
         self.last_brew_boiler_output = brew_demand;
 
-        // Safety check: disable heating if temperature exceeds maximum
-        if let Some(max_temp) = self.brew_boiler_config.max_temperature {
-            if let Some(current_temp) = self.brew_boiler.get_temperature() {
-                if current_temp >= max_temp {
-                    // No interpolated reading: this fires on every iteration of a
-                    // 10 Hz control loop for as long as the interlock holds, and an
-                    // `f32` at full `Display` precision changes with ADC noise on
-                    // essentially every one -- which would defeat the bus sink's
-                    // duplicate suppression entirely. The temperature and the
-                    // configured maximum both reach the host in `Status` and
-                    // `Configuration`; what only this line can say is *which*
-                    // interlock tripped.
-                    //log_warn!("Brew boiler heating disabled: temperature at or above configured maximum");
-                    brew_demand = 0.0;
-                }
-            }
+        // Safety check: disable heating if temperature is missing or exceeds maximum
+        if !command::interlocks::is_boiler_temperature_safe(
+            self.brew_boiler.get_temperature(),
+            self.brew_boiler_config.max_temperature,
+        ) {
+            brew_demand = 0.0;
         }
 
-        // Safety check: disable heating if pressure exceeds maximum
-        if let Some(max_pressure) = self.brew_boiler_config.max_pressure {
-            if let Some(current_pressure) = self.brew_boiler.get_pressure() {
-                if current_pressure >= max_pressure {
-                    // Constant text, for the reason given on the temperature
-                    // interlock above.
-                    //log_warn!("Brew boiler heating disabled: pressure at or above configured maximum");
-                    brew_demand = 0.0;
-                }
-            }
+        // Safety check: disable heating if pressure is missing or exceeds maximum
+        if !command::interlocks::is_boiler_pressure_safe(
+            self.brew_boiler.get_pressure(),
+            self.brew_boiler_config.max_pressure,
+        ) {
+            brew_demand = 0.0;
         }
 
         // Dry-run protection: disable heating if water level too low
@@ -1030,14 +1024,22 @@ impl<
         let control_state = self.configuration.persistent.steam_boiler.control_state;
         let mut steam_pv = match self.configuration.effective_steam_boiler_control_mode() {
             BoilerControlMode::Temperature => {
+                let Some(temp) = self.steam_boiler.get_temperature() else {
+                    self.steam_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
+                    return Output::Off;
+                };
                 self.steam_boiler_pid.setpoint = control_state.values.target_temperature as f32;
                 self.steam_boiler_pid.set_parameters(self.configuration.persistent.steam_boiler.temperature_pid_parameters);
-                self.steam_boiler.get_temperature().unwrap_or(0.0) as f32
+                temp as f32
             }
             BoilerControlMode::Pressure => {
+                let Some(pressure) = self.steam_boiler.get_pressure() else {
+                    self.steam_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
+                    return Output::Off;
+                };
                 self.steam_boiler_pid.setpoint = control_state.values.target_pressure as f32;
                 self.steam_boiler_pid.set_parameters(self.configuration.persistent.steam_boiler.pressure_pid_parameters);
-                self.steam_boiler.get_pressure().unwrap_or(0.0) as f32
+                pressure as f32
             }
             BoilerControlMode::Off => {
                 self.steam_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
@@ -1053,28 +1055,20 @@ impl<
         let mut steam_demand = steam_pid_out.out.max(0.0);
         self.last_steam_boiler_output = steam_demand;
 
-        // Safety check: disable heating if temperature exceeds maximum
-        if let Some(max_temp) = self.steam_boiler_config.max_temperature {
-            if let Some(current_temp) = self.steam_boiler.get_temperature() {
-                if current_temp >= max_temp {
-                    // Constant text, for the reason given on the brew boiler's
-                    // temperature interlock.
-                    //log_warn!("Steam boiler heating disabled: temperature at or above configured maximum");
-                    steam_demand = 0.0;
-                }
-            }
+        // Safety check: disable heating if temperature is missing or exceeds maximum
+        if !command::interlocks::is_boiler_temperature_safe(
+            self.steam_boiler.get_temperature(),
+            self.steam_boiler_config.max_temperature,
+        ) {
+            steam_demand = 0.0;
         }
 
-        // Safety check: disable heating if pressure exceeds maximum
-        if let Some(max_pressure) = self.steam_boiler_config.max_pressure {
-            if let Some(current_pressure) = self.steam_boiler.get_pressure() {
-                if current_pressure >= max_pressure {
-                    // Constant text, for the reason given on the brew boiler's
-                    // temperature interlock.
-                    //log_warn!("Steam boiler heating disabled: pressure at or above configured maximum");
-                    steam_demand = 0.0;
-                }
-            }
+        // Safety check: disable heating if pressure is missing or exceeds maximum
+        if !command::interlocks::is_boiler_pressure_safe(
+            self.steam_boiler.get_pressure(),
+            self.steam_boiler_config.max_pressure,
+        ) {
+            steam_demand = 0.0;
         }
 
         // Dry-run protection: disable heating if water level too low
