@@ -945,16 +945,24 @@ impl<
     async fn update_boiler(&mut self, actual_boiler_control_state: BoilerControlState, delta_t: f32) -> Output {
         let mut boiler_pv = match actual_boiler_control_state.mode {
             BoilerControlMode::Temperature => {
+                let Some(temp) = self.boiler.get_temperature() else {
+                    self.boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
+                    return Output::Off;
+                };
                 self.boiler_pid.setpoint = actual_boiler_control_state.values.target_temperature as f32;
                 self.boiler_pid.set_parameters(self.configuration.persistent.pid_parameters.boiler_temperature_params);
 
-                self.boiler.get_temperature().unwrap_or(0.0) as f32
+                temp as f32
             }
             BoilerControlMode::Pressure => {
+                let Some(pressure) = self.boiler.get_pressure() else {
+                    self.boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
+                    return Output::Off;
+                };
                 self.boiler_pid.setpoint = actual_boiler_control_state.values.target_pressure as f32;
                 self.boiler_pid.set_parameters(self.configuration.persistent.pid_parameters.boiler_pressure_params);
 
-                self.boiler.get_pressure().unwrap_or(0.0) as f32
+                pressure as f32
             }
             _ => 0.0,
         };
@@ -978,8 +986,10 @@ impl<
                 // serves both roles, so the ceiling comes from the controller state rather
                 // than from a single configured maximum.
                 let max_temperature = crate::single_boiler_state::max_temperature_for(self.state);
-                let too_hot = self.boiler.get_temperature()
-                    .map_or(false, |current| current as f32 >= max_temperature);
+                let too_hot = !command::interlocks::is_boiler_temperature_safe(
+                    self.boiler.get_temperature(),
+                    Some(max_temperature),
+                );
 
                 // Dry-run protection: disable heating if water level too low
                 let boiler_level = self.boiler.get_water_level();

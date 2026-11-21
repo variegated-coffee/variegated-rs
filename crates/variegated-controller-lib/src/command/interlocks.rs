@@ -4,7 +4,45 @@
 //! tested here rather than argued about in a comment. The third -- "is the tank empty" --
 //! needs a `Tank` from `variegated-hal` and so lives in [`super::hardware`].
 
-use variegated_controller_types::{BoilerConfiguration, MachineConfiguration, WaterLevelType};
+use variegated_controller_types::{BoilerConfiguration, MachineConfiguration, PressureType, TemperatureType, WaterLevelType};
+
+/// Is a boiler's temperature safe to heat?
+///
+/// Matches [`is_boiler_level_safe`]: when a ceiling (`max_temperature`) is configured,
+/// a `None` reading fails closed (`false`) rather than permitting heating. When no
+/// ceiling is configured (`None`), the interlock is disabled.
+pub fn is_boiler_temperature_safe(
+    temperature: Option<TemperatureType>,
+    max_temperature: Option<TemperatureType>,
+) -> bool {
+    let Some(maximum) = max_temperature else {
+        return true;
+    };
+
+    match temperature {
+        Some(current) => current < maximum,
+        None => false,
+    }
+}
+
+/// Is a boiler's pressure safe to heat?
+///
+/// Matches [`is_boiler_level_safe`]: when a ceiling (`max_pressure`) is configured,
+/// a `None` reading fails closed (`false`) rather than permitting heating. When no
+/// ceiling is configured (`None`), the interlock is disabled.
+pub fn is_boiler_pressure_safe(
+    pressure: Option<PressureType>,
+    max_pressure: Option<PressureType>,
+) -> bool {
+    let Some(maximum) = max_pressure else {
+        return true;
+    };
+
+    match pressure {
+        Some(current) => current < maximum,
+        None => false,
+    }
+}
 
 /// Is a boiler's water level safe to heat?
 ///
@@ -90,6 +128,24 @@ mod tests {
     #[test]
     fn a_missing_reading_blocks_heating_when_the_feature_is_on() {
         assert!(!is_boiler_level_safe(None, &boiler_with_minimum(Some(30))));
+    }
+
+    #[test]
+    fn temperature_interlock_fails_closed_on_missing_reading() {
+        assert!(is_boiler_temperature_safe(None, None));
+        assert!(is_boiler_temperature_safe(Some(93.0), Some(105.0)));
+        assert!(!is_boiler_temperature_safe(Some(105.0), Some(105.0)));
+        assert!(!is_boiler_temperature_safe(Some(110.0), Some(105.0)));
+        assert!(!is_boiler_temperature_safe(None, Some(105.0)));
+    }
+
+    #[test]
+    fn pressure_interlock_fails_closed_on_missing_reading() {
+        assert!(is_boiler_pressure_safe(None, None));
+        assert!(is_boiler_pressure_safe(Some(1.2), Some(2.0)));
+        assert!(!is_boiler_pressure_safe(Some(2.0), Some(2.0)));
+        assert!(!is_boiler_pressure_safe(Some(2.5), Some(2.0)));
+        assert!(!is_boiler_pressure_safe(None, Some(2.0)));
     }
 
     fn machine(prevent: bool, allow_continue: bool) -> MachineConfiguration {
